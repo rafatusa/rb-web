@@ -1,0 +1,193 @@
+name: Deploy Static Site
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # security - Trivy vulnerability scan on repo source
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security Scan (Trivy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+  # ---------------------------------------------------------------------------
+  # build - prepare static assets
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Static Assets
+    runs-on: ubuntu-latest
+    needs: [security]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # If the project later adds a Node build step (npm run build), add it here.
+      # For now the src/ directory is already production-ready HTML/CSS/JS.
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-site
+          path: src/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # provision - Terraform: create/update S3, CloudFront, ACM, Route53
+  # ---------------------------------------------------------------------------
+  provision:
+    name: Terraform Provision
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    outputs:
+      site_url: ${{ steps.tf_outputs.outputs.site_url }}
+      s3_bucket_name: ${{ steps.tf_outputs.outputs.s3_bucket_name }}
+      cloudfront_distribution_id: ${{ steps.tf_outputs.outputs.cloudfront_distribution_id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Terraform apply
+        working-directory: terraform
+        run: |
+          terraform apply -auto-approve \
+            -var="project_name=${{ secrets.PROJECT_NAME }}" \
+            -var="aws_region=${{ secrets.AWS_REGION }}" \
+            -var="domain_name=${{ vars.DOMAIN_NAME }}" \
+            -var="hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}"
+
+      - name: Capture Terraform outputs
+        id: tf_outputs
+        working-directory: terraform
+        run: |
+          echo "site_url=$(terraform output -raw site_url)" >> "$GITHUB_OUTPUT"
+          echo "s3_bucket_name=$(terraform output -raw s3_bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_distribution_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # configure - sync static files to S3 and invalidate CloudFront cache
+  # (no Ansible needed; aws-cli handles the sync)
+  # ---------------------------------------------------------------------------
+  configure:
+    name: Sync & Invalidate
+    runs-on: ubuntu-latest
+    needs: [provision, build]
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: static-site
+          path: dist/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Sync static files to S3
+        run: |
+          aws s3 sync dist/ "s3://${{ needs.provision.outputs.s3_bucket_name }}/" \
+            --delete \
+            --cache-control "public, max-age=3600"
+
+      - name: Invalidate CloudFront cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ needs.provision.outputs.cloudfront_distribution_id }}" \
+            --paths "/*"
+
+  # ---------------------------------------------------------------------------
+  # verify - hit the live endpoint and fail on non-2xx/3xx
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    needs: [configure]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ secrets.AWS_REGION }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate"
+
+      - name: Read endpoint from Terraform output
+        id: endpoint
+        working-directory: terraform
+        run: |
+          SITE_URL="$(terraform output -raw site_url)"
+          echo "site_url=${SITE_URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for CloudFront propagation
+        run: sleep 30
+
+      - name: Smoke test - verify site returns 2xx/3xx
+        run: |-
+          SITE_URL="${{ steps.endpoint.outputs.site_url }}"
+          echo "Probing: ${SITE_URL}"
+          STATUS=$(curl -Lsf -o /dev/null -w "%{http_code}" --max-time 30 "${SITE_URL}")
+          echo "HTTP status: ${STATUS}"
+          if [[ "$STATUS" =~ ^[23] ]]; then
+            echo " Site is reachable (HTTP ${STATUS})."
+          else
+            echo " Unexpected HTTP status ${STATUS}."
+            exit 1
+          fi
