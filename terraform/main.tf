@@ -29,16 +29,13 @@ variable "aws_region" {
 variable "domain_name" {
   description = "The custom domain name to serve the site from (e.g. example.com). Trailing dots are stripped automatically."
   type        = string
-
-  validation {
-    condition     = length(var.domain_name) > 0
-    error_message = "domain_name must not be empty. Set the DOMAIN_NAME repository variable."
-  }
+  default     = ""
 }
 
 variable "hosted_zone_id" {
   description = "Route53 hosted zone ID for the domain."
   type        = string
+  default     = ""
 }
 
 # ---------------------------------------------------------------------------
