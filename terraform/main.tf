@@ -27,22 +27,13 @@ variable "aws_region" {
 }
 
 variable "domain_name" {
-  description = "The custom domain name to serve the site from (e.g. example.com)."
+  description = "The custom domain name to serve the site from (e.g. example.com). Trailing dots must be stripped before this variable is set."
   type        = string
 }
 
 variable "hosted_zone_id" {
   description = "Route53 hosted zone ID for the domain."
   type        = string
-}
-
-# ---------------------------------------------------------------------------
-# Locals - normalise the domain: strip ALL trailing dots that DNS notation adds.
-# trimsuffix only removes one occurrence; the regex \.+$ removes one or more.
-# ---------------------------------------------------------------------------
-
-locals {
-  domain_name = replace(var.domain_name, "/\\.+$/", "")
 }
 
 # ---------------------------------------------------------------------------
@@ -117,11 +108,11 @@ resource "aws_s3_bucket_versioning" "site" {
 
 resource "aws_acm_certificate" "cert" {
   provider          = aws.us_east_1
-  domain_name       = local.domain_name
+  domain_name       = var.domain_name
   validation_method = "DNS"
 
   subject_alternative_names = [
-    "www.${local.domain_name}",
+    "www.${var.domain_name}",
   ]
 
   lifecycle {
@@ -176,7 +167,7 @@ resource "aws_cloudfront_distribution" "site" {
   is_ipv6_enabled     = true
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
-  aliases             = [local.domain_name, "www.${local.domain_name}"]
+  aliases             = [var.domain_name, "www.${var.domain_name}"]
   comment             = "${var.project_name} static site"
 
   # ACM cert must be fully validated before distribution is created.
@@ -278,7 +269,7 @@ resource "aws_s3_bucket_policy" "site" {
 
 resource "aws_route53_record" "site" {
   zone_id = var.hosted_zone_id
-  name    = local.domain_name
+  name    = var.domain_name
   type    = "A"
 
   alias {
@@ -290,7 +281,7 @@ resource "aws_route53_record" "site" {
 
 resource "aws_route53_record" "www" {
   zone_id = var.hosted_zone_id
-  name    = "www.${local.domain_name}"
+  name    = "www.${var.domain_name}"
   type    = "A"
 
   alias {
@@ -321,5 +312,5 @@ output "s3_bucket_name" {
 
 output "site_url" {
   description = "Public HTTPS URL of the deployed site."
-  value       = "https://${local.domain_name}"
+  value       = "https://${var.domain_name}"
 }
