@@ -37,6 +37,14 @@ variable "hosted_zone_id" {
 }
 
 # ---------------------------------------------------------------------------
+# Locals - normalise the domain: strip any trailing dot that DNS notation adds
+# ---------------------------------------------------------------------------
+
+locals {
+  domain_name = trimsuffix(var.domain_name, ".")
+}
+
+# ---------------------------------------------------------------------------
 # Providers
 # ---------------------------------------------------------------------------
 
@@ -108,11 +116,11 @@ resource "aws_s3_bucket_versioning" "site" {
 
 resource "aws_acm_certificate" "cert" {
   provider          = aws.us_east_1
-  domain_name       = var.domain_name
+  domain_name       = local.domain_name
   validation_method = "DNS"
 
   subject_alternative_names = [
-    "www.${var.domain_name}",
+    "www.${local.domain_name}",
   ]
 
   lifecycle {
@@ -167,7 +175,7 @@ resource "aws_cloudfront_distribution" "site" {
   is_ipv6_enabled     = true
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
-  aliases             = [var.domain_name, "www.${var.domain_name}"]
+  aliases             = [local.domain_name, "www.${local.domain_name}"]
   comment             = "${var.project_name} static site"
 
   # ACM cert must be fully validated before distribution is created.
@@ -269,7 +277,7 @@ resource "aws_s3_bucket_policy" "site" {
 
 resource "aws_route53_record" "site" {
   zone_id = var.hosted_zone_id
-  name    = var.domain_name
+  name    = local.domain_name
   type    = "A"
 
   alias {
@@ -281,7 +289,7 @@ resource "aws_route53_record" "site" {
 
 resource "aws_route53_record" "www" {
   zone_id = var.hosted_zone_id
-  name    = "www.${var.domain_name}"
+  name    = "www.${local.domain_name}"
   type    = "A"
 
   alias {
@@ -312,5 +320,5 @@ output "s3_bucket_name" {
 
 output "site_url" {
   description = "Public HTTPS URL of the deployed site."
-  value       = "https://${var.domain_name}"
+  value       = "https://${local.domain_name}"
 }
