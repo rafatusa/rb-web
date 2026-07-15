@@ -37,11 +37,12 @@ variable "hosted_zone_id" {
 }
 
 # ---------------------------------------------------------------------------
-# Locals - normalise the domain: strip any trailing dot that DNS notation adds
+# Locals - normalise the domain: strip ALL trailing dots that DNS notation adds.
+# trimsuffix only removes one occurrence; the regex \.+$ removes one or more.
 # ---------------------------------------------------------------------------
 
 locals {
-  domain_name = trimsuffix(var.domain_name, ".")
+  domain_name = replace(var.domain_name, "/\\.+$/", "")
 }
 
 # ---------------------------------------------------------------------------
