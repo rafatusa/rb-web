@@ -91,7 +91,8 @@ jobs:
           # vars.DOMAIN_NAME may be set as a DNS FQDN (e.g. "example.com.") which
           # is valid DNS notation but ACM rejects domain names ending with a period.
           # We sanitise here in bash so Terraform receives a clean value.
-          DOMAIN_NAME="$(echo '${{ vars.DOMAIN_NAME }}' | sed 's/\.\+$//')"
+          DOMAIN_NAME="$(echo '${{ vars.DOMAIN_NAME }}' | sed 's/\.*//')"
+          DOMAIN_NAME="$(printf '%s' '${{ vars.DOMAIN_NAME }}' | sed 's/[.]*$//')"
           terraform apply -auto-approve \
             -var="project_name=${{ secrets.PROJECT_NAME }}" \
             -var="aws_region=${{ secrets.AWS_REGION }}" \
